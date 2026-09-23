@@ -211,7 +211,7 @@ function openPicker(useCamera){
     const reader = new FileReader();
     if(useCamera){
       reader.onload = async ev => {
-        pendingStamp = {id, side, raw: ev.target.result, loc:null};
+        pendingStamp = {id, side, raw: ev.target.result, loc:null, address:null};
         statusEl.textContent = 'Getting location…';
         const loc = await getLocation();
         pendingStamp.loc = loc;
@@ -220,10 +220,11 @@ function openPicker(useCamera){
           geoCoords.textContent = `Lat ${loc.lat.toFixed(6)}, Long ${loc.lon.toFixed(6)} — detecting locality…`;
           geoBackdrop.classList.add('open');
           statusEl.textContent = '';
-          const locality = await reverseGeocode(loc.lat, loc.lon);
+          const geo = await reverseGeocode(loc.lat, loc.lon);
           geoCoords.textContent = `Lat ${loc.lat.toFixed(6)}, Long ${loc.lon.toFixed(6)}`;
-          if(locality){
-            localityInput.value = locality;
+          if(geo && geo.title){
+            localityInput.value = geo.title;
+            pendingStamp.address = geo.address;
           } else {
             localityInput.placeholder = 'Locality name (auto-detect unavailable here — type it in)';
           }
@@ -266,40 +267,104 @@ async function reverseGeocode(lat, lon){
   try{
     const controller = new AbortController();
     const t = setTimeout(()=>controller.abort(), 6000);
-    const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=12&addressdetails=1`, {signal: controller.signal, headers:{'Accept':'application/json'}});
+    const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=14&addressdetails=1`, {signal: controller.signal, headers:{'Accept':'application/json'}});
     clearTimeout(t);
     if(!res.ok) return null;
     const data = await res.json();
     const a = data.address || {};
-    const parts = [a.suburb || a.neighbourhood || a.city || a.town || a.village, a.state].filter(Boolean);
-    if(parts.length) return parts.join(', ');
-    if(data.display_name) return data.display_name.split(',').slice(0,2).join(',').trim();
-    return null;
+    const city = a.city || a.town || a.village || a.suburb || a.county;
+    const title = [city, a.state, a.country].filter(Boolean).join(', ');
+    return {title: title || null, address: data.display_name || null};
   }catch(e){
     return null;
   }
 }
 
-async function stampImage(srcDataUrl, lines){
+function wrapCanvasText(ctx, text, maxWidth, maxLines){
+  if(!text) return [];
+  const words = text.split(' ');
+  const lines = [];
+  let cur = '';
+  for(const w of words){
+    const test = cur ? cur + ' ' + w : w;
+    if(ctx.measureText(test).width > maxWidth && cur){
+      lines.push(cur);
+      cur = w;
+      if(lines.length === maxLines - 1) break;
+    } else {
+      cur = test;
+    }
+  }
+  if(cur) lines.push(cur);
+  if(lines.length === maxLines){
+    let last = lines[maxLines-1];
+    while(ctx.measureText(last + '…').width > maxWidth && last.length > 1){
+      last = last.slice(0, -1);
+    }
+    lines[maxLines-1] = last + '…';
+  }
+  return lines;
+}
+
+function formatStampDate(d){
+  const offsetMin = -d.getTimezoneOffset();
+  const sign = offsetMin >= 0 ? '+' : '-';
+  const abs = Math.abs(offsetMin);
+  const oh = String(Math.floor(abs/60)).padStart(2,'0');
+  const om = String(abs%60).padStart(2,'0');
+  const datePart = d.toLocaleDateString('en-GB');
+  const timePart = d.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', hour12:true});
+  return `${datePart}  ${timePart}  GMT ${sign}${oh}:${om}`;
+}
+
+async function stampImage(srcDataUrl, {lat, lon, title, address}){
   const img = await loadImgAsync(srcDataUrl);
   const canvas = document.createElement('canvas');
   canvas.width = img.width; canvas.height = img.height;
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img,0,0);
-  const fontSize = Math.max(16, Math.round(img.width*0.026));
-  const lineH = Math.round(fontSize*1.35);
-  const pad = Math.round(img.width*0.025);
-  const barH = lineH*lines.length + pad;
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fillRect(0, img.height-barH, img.width, barH);
+
+  const W = img.width, H = img.height;
+  const pad = Math.round(W*0.035);
+  const titleSize = Math.max(20, Math.round(W*0.05));
+  const subSize = Math.max(13, Math.round(W*0.023));
+  const subGap = Math.round(subSize*1.5);
+  const maxTextWidth = W - pad*2;
+
+  const subLines = [];
+  ctx.font = `400 ${subSize}px Inter, sans-serif`;
+  if(address) subLines.push(...wrapCanvasText(ctx, address, maxTextWidth, 2));
+  if(lat!=null && lon!=null) subLines.push(`Lat ${lat.toFixed(6)}°  Long ${lon.toFixed(6)}°`);
+  subLines.push(formatStampDate(new Date()));
+
+  const cardH = pad*1.4 + titleSize*1.05 + subGap*subLines.length;
+  const cardY = H - cardH;
+  const r = 18;
+
+  ctx.fillStyle = 'rgba(53,53,51,0.88)';
+  ctx.beginPath();
+  ctx.moveTo(0, cardY);
+  ctx.lineTo(W, cardY);
+  ctx.lineTo(W, H);
+  ctx.lineTo(0, H);
+  ctx.lineTo(0, cardY+r);
+  ctx.arcTo(0, cardY, r, cardY, r);
+  ctx.closePath();
+  ctx.fill();
+
   ctx.fillStyle = '#fff';
   ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-  ctx.font = `500 ${fontSize}px Inter, sans-serif`;
-  lines.forEach((line,i)=>{
-    const y = img.height - barH + pad/2 + lineH*i + lineH/2;
-    ctx.fillText(line, pad, y);
+  ctx.textBaseline = 'alphabetic';
+  let ty = cardY + pad*0.85 + titleSize*0.78;
+  ctx.font = `700 ${titleSize}px Inter, sans-serif`;
+  ctx.fillText(title || 'Location', pad, ty, maxTextWidth);
+
+  ctx.font = `400 ${subSize}px Inter, sans-serif`;
+  subLines.forEach(line=>{
+    ty += subGap;
+    ctx.fillText(line, pad, ty);
   });
+
   return canvas.toDataURL('image/jpeg', 0.92);
 }
 
@@ -318,25 +383,26 @@ sheetBackdrop.addEventListener('click', e=>{ if(e.target===sheetBackdrop){ sheet
 document.getElementById('geoConfirm').addEventListener('click', async ()=>{
   geoBackdrop.classList.remove('open');
   if(!pendingStamp) return;
-  const {id, side, raw, loc} = pendingStamp;
-  const locality = localityInput.value.trim();
-  const lines = [];
-  if(loc) lines.push(`Lat ${loc.lat.toFixed(6)}, Long ${loc.lon.toFixed(6)}`);
-  if(locality) lines.push(locality);
+  const {id, side, raw, loc, address} = pendingStamp;
+  const title = localityInput.value.trim();
   let finalSrc = raw;
-  if(lines.length){
-    try{ finalSrc = await stampImage(raw, lines); }catch(e){}
-  }
+  try{
+    finalSrc = await stampImage(raw, {lat: loc ? loc.lat : null, lon: loc ? loc.lon : null, title, address});
+  }catch(e){}
   const r = rows.find(r=>r.id===id);
   if(r){ if(side==='before') r.beforeSrc = finalSrc; else r.afterSrc = finalSrc; render(); }
   pendingStamp = null; pending = null;
 });
-document.getElementById('geoSkip').addEventListener('click', ()=>{
+document.getElementById('geoSkip').addEventListener('click', async ()=>{
   geoBackdrop.classList.remove('open');
   if(!pendingStamp) return;
-  const {id, side, raw} = pendingStamp;
+  const {id, side, raw, loc, address} = pendingStamp;
+  let finalSrc = raw;
+  try{
+    finalSrc = await stampImage(raw, {lat: loc ? loc.lat : null, lon: loc ? loc.lon : null, title: '', address});
+  }catch(e){}
   const r = rows.find(r=>r.id===id);
-  if(r){ if(side==='before') r.beforeSrc = raw; else r.afterSrc = raw; render(); }
+  if(r){ if(side==='before') r.beforeSrc = finalSrc; else r.afterSrc = finalSrc; render(); }
   pendingStamp = null; pending = null;
 });
 
