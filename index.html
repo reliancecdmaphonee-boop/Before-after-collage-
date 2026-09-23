@@ -508,20 +508,35 @@ function drawCover(ctx, img, x, y, w, h){
   ctx.drawImage(img, 0, 0, img.width, img.height, dx, dy, dw, dh);
 }
 
+async function downloadBlob(blob, filename){
+  if(window.claude && typeof window.claude.use === 'function'){
+    try{
+      const dl = await window.claude.use('downloads');
+      if(dl){
+        const arrayBuf = await blob.arrayBuffer();
+        await dl.save({filename, data:arrayBuf});
+        return;
+      }
+    }catch(e){ /* fall through to standard browser download */ }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 4000);
+}
+
 dlBtn.addEventListener('click', async ()=>{
   dlBtn.disabled = true;
   statusEl.textContent = 'Building collage…';
   try{
     const canvas = await buildCanvas();
     const blob = await new Promise(res=>canvas.toBlob(res, 'image/png'));
-    const dl = await claude.use('downloads');
-    if(dl){
-      const arrayBuf = await blob.arrayBuffer();
-      await dl.save({filename:'before-after-collage.png', data:arrayBuf});
-      statusEl.textContent = 'Collage ready — check your downloads.';
-    } else {
-      statusEl.textContent = 'Downloads aren\'t available in this view.';
-    }
+    await downloadBlob(blob, 'before-after-collage.png');
+    statusEl.textContent = 'Collage ready — check your downloads.';
   } catch(err){
     statusEl.textContent = 'Something went wrong building the collage.';
   }
